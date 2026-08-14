@@ -1,0 +1,181 @@
+import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { corsHeaders, handleOptions } from "@/lib/cors";
+
+export const maxDuration = 60;
+
+export async function OPTIONS(request: Request) {
+  return handleOptions(request);
+}
+
+export async function POST(request: Request) {
+  const origin = request.headers.get("origin");
+  const headers = corsHeaders(origin);
+
+  try {
+    const formData = await request.formData();
+    const photo = formData.get("photo") as File | null;
+    const latitudeStr = formData.get("latitude") as string | null;
+    const longitudeStr = formData.get("longitude") as string | null;
+    const wallet = (formData.get("wallet") || formData.get("wallet_address")) as string | null;
+
+    // 1. Validate Photo
+    if (!photo || !(photo instanceof File)) {
+      return NextResponse.json(
+        { error: "Validation failed: 'photo' file is required." },
+        { status: 400, headers }
+      );
+    }
+
+    const validMimeTypes = ["image/jpeg", "image/png", "image/jpg", "image/webp"];
+    if (!validMimeTypes.includes(photo.type.toLowerCase())) {
+      return NextResponse.json(
+        { error: `Validation failed: Invalid photo mime type '${photo.type}'. Allowed types: jpeg, png, webp.` },
+        { status: 400, headers }
+      );
+    }
+
+    const maxSizeBytes = 10 * 1024 * 1024; // 10MB
+    if (photo.size > maxSizeBytes) {
+      return NextResponse.json(
+        { error: `Validation failed: Photo size (${(photo.size / (1024 * 1024)).toFixed(2)}MB) exceeds 10MB limit.` },
+        { status: 400, headers }
+      );
+    }
+
+    // 2. Validate Latitude & Longitude
+    if (latitudeStr === null || latitudeStr === undefined || latitudeStr.trim() === "") {
+      return NextResponse.json(
+        { error: "Validation failed: 'latitude' is required." },
+        { status: 400, headers }
+      );
+    }
+
+    const latitude = parseFloat(latitudeStr);
+    if (isNaN(latitude) || latitude < -90 || latitude > 90) {
+      return NextResponse.json(
+        { error: "Validation failed: 'latitude' must be a valid number between -90 and 90." },
+        { status: 400, headers }
+      );
+    }
+
+    if (longitudeStr === null || longitudeStr === undefined || longitudeStr.trim() === "") {
+      return NextResponse.json(
+        { error: "Validation failed: 'longitude' is required." },
+        { status: 400, headers }
+      );
+    }
+
+    const longitude = parseFloat(longitudeStr);
+    if (isNaN(longitude) || longitude < -180 || longitude > 180) {
+      return NextResponse.json(
+        { error: "Validation failed: 'longitude' must be a valid number between -180 and 180." },
+        { status: 400, headers }
+      );
+    }
+
+    // 3. Validate Wallet (strictly 40 hex characters after 0x prefix)
+    if (!wallet || typeof wallet !== "string" || !/^0x[a-fA-F0-9]{40}$/.test(wallet.trim())) {
+      return NextResponse.json(
+        { error: "Validation failed: 'wallet' must be a valid 0x-prefixed 40-character hex Ethereum address." },
+        { status: 400, headers }
+      );
+    }
+
+    const walletAddress = wallet.trim();
+
+    // 4. Upsert User by wallet_address
+    let user;
+    try {
+      user = await prisma.user.upsert({
+        where: { wallet_address: walletAddress },
+        update: {},
+        create: { wallet_address: walletAddress },
+      });
+    } catch (dbErr: any) {
+      return NextResponse.json(
+        { error: `Database error while upserting user: ${dbErr.message || String(dbErr)}` },
+        { status: 500, headers }
+      );
+    }
+
+    // 5. Upload Photo to IPFS via Pinata
+    const pinataJwt = process.env.PINATA_JWT;
+
+    if (!pinataJwt) {
+      return NextResponse.json(
+        { error: "Server configuration error: PINATA_JWT is not set in environment." },
+        { status: 500, headers }
+      );
+    }
+
+    let ipfsHash = "";
+    try {
+      const pinataFormData = new FormData();
+      pinataFormData.append("file", photo, photo.name || "mangrove-site.jpg");
+
+      const pinataRes = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${pinataJwt}`,
+        },
+        body: pinataFormData,
+      });
+
+      if (!pinataRes.ok) {
+        const errorText = await pinataRes.text();
+        return NextResponse.json(
+          { error: `IPFS upload failed (Pinata API error): ${errorText}` },
+          { status: 500, headers }
+        );
+      }
+
+      const pinataData = await pinataRes.json();
+      ipfsHash = pinataData.IpfsHash;
+    } catch (ipfsErr: any) {
+      return NextResponse.json(
+        { error: `IPFS upload network error: ${ipfsErr.message || String(ipfsErr)}` },
+        { status: 500, headers }
+      );
+    }
+
+    // 6. Construct photo_url
+    const gatewayBase = (process.env.PINATA_GATEWAY_URL || "https://gateway.pinata.cloud/ipfs").replace(/\/$/, "");
+    const photoUrl = `${gatewayBase}/${ipfsHash}`;
+
+    // 7. Create Submission record
+    let submission;
+    try {
+      submission = await prisma.submission.create({
+        data: {
+          user_id: user.id,
+          photo_url: photoUrl,
+          ipfs_hash: ipfsHash,
+          latitude,
+          longitude,
+          status: "pending",
+        },
+      });
+    } catch (dbErr: any) {
+      return NextResponse.json(
+        { error: `Database error while creating submission: ${dbErr.message || String(dbErr)}` },
+        { status: 500, headers }
+      );
+    }
+
+    // 8. Return successful response
+    return NextResponse.json(
+      {
+        id: submission.id,
+        ipfs_hash: submission.ipfs_hash,
+        status: submission.status,
+      },
+      { status: 201, headers }
+    );
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: `Unexpected server error: ${err.message || String(err)}` },
+      { status: 500, headers }
+    );
+  }
+}
