@@ -21,6 +21,7 @@ export async function POST(request: Request) {
 
     // 1. Validate Photo
     if (!photo || !(photo instanceof File)) {
+      console.error("[verify] submit rejected: missing 'photo' file");
       return NextResponse.json(
         { error: "Validation failed: 'photo' file is required." },
         { status: 400, headers }
@@ -29,6 +30,7 @@ export async function POST(request: Request) {
 
     const validMimeTypes = ["image/jpeg", "image/png", "image/jpg", "image/webp"];
     if (!validMimeTypes.includes(photo.type.toLowerCase())) {
+      console.error(`[verify] submit rejected: invalid photo mime type '${photo.type}'`);
       return NextResponse.json(
         { error: `Validation failed: Invalid photo mime type '${photo.type}'. Allowed types: jpeg, png, webp.` },
         { status: 400, headers }
@@ -37,6 +39,7 @@ export async function POST(request: Request) {
 
     const maxSizeBytes = 10 * 1024 * 1024; // 10MB
     if (photo.size > maxSizeBytes) {
+      console.error(`[verify] submit rejected: photo size ${photo.size} bytes exceeds ${maxSizeBytes} byte limit`);
       return NextResponse.json(
         { error: `Validation failed: Photo size (${(photo.size / (1024 * 1024)).toFixed(2)}MB) exceeds 10MB limit.` },
         { status: 400, headers }
@@ -45,6 +48,7 @@ export async function POST(request: Request) {
 
     // 2. Validate Latitude & Longitude
     if (latitudeStr === null || latitudeStr === undefined || latitudeStr.trim() === "") {
+      console.error("[verify] submit rejected: missing 'latitude'");
       return NextResponse.json(
         { error: "Validation failed: 'latitude' is required." },
         { status: 400, headers }
@@ -53,6 +57,7 @@ export async function POST(request: Request) {
 
     const latitude = parseFloat(latitudeStr);
     if (isNaN(latitude) || latitude < -90 || latitude > 90) {
+      console.error(`[verify] submit rejected: invalid latitude '${latitudeStr}'`);
       return NextResponse.json(
         { error: "Validation failed: 'latitude' must be a valid number between -90 and 90." },
         { status: 400, headers }
@@ -60,6 +65,7 @@ export async function POST(request: Request) {
     }
 
     if (longitudeStr === null || longitudeStr === undefined || longitudeStr.trim() === "") {
+      console.error("[verify] submit rejected: missing 'longitude'");
       return NextResponse.json(
         { error: "Validation failed: 'longitude' is required." },
         { status: 400, headers }
@@ -68,6 +74,7 @@ export async function POST(request: Request) {
 
     const longitude = parseFloat(longitudeStr);
     if (isNaN(longitude) || longitude < -180 || longitude > 180) {
+      console.error(`[verify] submit rejected: invalid longitude '${longitudeStr}'`);
       return NextResponse.json(
         { error: "Validation failed: 'longitude' must be a valid number between -180 and 180." },
         { status: 400, headers }
@@ -76,6 +83,7 @@ export async function POST(request: Request) {
 
     // 3. Validate Wallet (strictly 40 hex characters after 0x prefix)
     if (!wallet || typeof wallet !== "string" || !/^0x[a-fA-F0-9]{40}$/.test(wallet.trim())) {
+      console.error(`[verify] submit rejected: invalid or missing wallet field (received keys: ${Array.from(formData.keys()).join(", ")})`);
       return NextResponse.json(
         { error: "Validation failed: 'wallet' must be a valid 0x-prefixed 40-character hex Ethereum address." },
         { status: 400, headers }
@@ -93,6 +101,7 @@ export async function POST(request: Request) {
         create: { wallet_address: walletAddress },
       });
     } catch (dbErr: any) {
+      console.error(`[verify] submit failed: user upsert threw: ${dbErr.message || String(dbErr)}`);
       return NextResponse.json(
         { error: `Database error while upserting user: ${dbErr.message || String(dbErr)}` },
         { status: 500, headers }
@@ -103,6 +112,7 @@ export async function POST(request: Request) {
     const pinataJwt = process.env.PINATA_JWT;
 
     if (!pinataJwt) {
+      console.error("[verify] submit failed: PINATA_JWT is not set in environment");
       return NextResponse.json(
         { error: "Server configuration error: PINATA_JWT is not set in environment." },
         { status: 500, headers }
@@ -124,6 +134,7 @@ export async function POST(request: Request) {
 
       if (!pinataRes.ok) {
         const errorText = await pinataRes.text();
+        console.error(`[verify] submit failed: Pinata upload returned ${pinataRes.status}: ${errorText}`);
         return NextResponse.json(
           { error: `IPFS upload failed (Pinata API error): ${errorText}` },
           { status: 500, headers }
@@ -133,6 +144,7 @@ export async function POST(request: Request) {
       const pinataData = await pinataRes.json();
       ipfsHash = pinataData.IpfsHash;
     } catch (ipfsErr: any) {
+      console.error(`[verify] submit failed: Pinata upload threw: ${ipfsErr.message || String(ipfsErr)}`);
       return NextResponse.json(
         { error: `IPFS upload network error: ${ipfsErr.message || String(ipfsErr)}` },
         { status: 500, headers }
@@ -157,6 +169,7 @@ export async function POST(request: Request) {
         },
       });
     } catch (dbErr: any) {
+      console.error(`[verify] submit failed: submission create threw: ${dbErr.message || String(dbErr)}`);
       return NextResponse.json(
         { error: `Database error while creating submission: ${dbErr.message || String(dbErr)}` },
         { status: 500, headers }
@@ -173,6 +186,7 @@ export async function POST(request: Request) {
       { status: 201, headers }
     );
   } catch (err: any) {
+    console.error(`[verify] submit failed: unexpected error: ${err.message || String(err)}`);
     return NextResponse.json(
       { error: `Unexpected server error: ${err.message || String(err)}` },
       { status: 500, headers }

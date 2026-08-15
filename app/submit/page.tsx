@@ -14,6 +14,15 @@ function shortenAddress(address: string) {
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
 
+/** Thrown when the server responded (non-2xx), as opposed to a network failure. */
+class ResponseError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 /** Returns a finite number, or null for blank/non-numeric input. */
 function parseCoordinate(value: string): number | null {
   const trimmed = value.trim();
@@ -167,13 +176,33 @@ export default function SubmitPage() {
       body.append("walletAddress", address);
 
       const response = await fetch("/api/submit", { method: "POST", body });
-      if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+
+      if (!response.ok) {
+        let message = `Request failed with status ${response.status}`;
+        try {
+          const data = await response.json();
+          if (typeof data?.error === "string" && data.error.trim() !== "") {
+            message = data.error;
+          } else if (typeof data?.message === "string" && data.message.trim() !== "") {
+            message = data.message;
+          }
+        } catch {
+          // Body wasn't JSON — keep the status-based message.
+        }
+        throw new ResponseError(response.status, message);
+      }
 
       router.push("/dashboard");
     } catch (err) {
-      // The endpoint may not exist yet; a missing backend must not break the UI.
       console.error("Submission failed:", err);
-      setSubmitError("Verification service unavailable — please try again shortly.");
+      // fetch() only rejects on a genuine network failure (offline, DNS,
+      // CORS preflight, etc.); a non-2xx response resolves and is handled
+      // above as a ResponseError with the server's real status/message.
+      setSubmitError(
+        err instanceof ResponseError
+          ? `${err.status}: ${err.message}`
+          : "Verification service unavailable — please try again shortly."
+      );
     } finally {
       setSubmitting(false);
     }
