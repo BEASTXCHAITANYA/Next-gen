@@ -8,8 +8,8 @@ const MINIMAL_ABI = [
   "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
 ];
 
-export async function OPTIONS() {
-  return handleOptions();
+export async function OPTIONS(request: Request) {
+  return handleOptions(request);
 }
 
 export async function POST(
@@ -17,6 +17,8 @@ export async function POST(
   { params }: { params: { submissionId: string } }
 ) {
   const { submissionId } = params;
+  const origin = req.headers.get("origin");
+  const headers = corsHeaders(origin);
 
   try {
     // 1. Load Submission by submissionId (including user and credit relations)
@@ -31,7 +33,7 @@ export async function POST(
     if (!submission) {
       return NextResponse.json(
         { error: `Submission '${submissionId}' not found.` },
-        { status: 404, headers: corsHeaders }
+        { status: 404, headers }
       );
     }
 
@@ -41,7 +43,7 @@ export async function POST(
         {
           error: `Submission '${submissionId}' cannot be minted because its status is '${submission.status}' (must be 'verified').`,
         },
-        { status: 400, headers: corsHeaders }
+        { status: 400, headers }
       );
     }
 
@@ -57,7 +59,7 @@ export async function POST(
           tx_hash: submission.credit.tx_hash,
           explorer_url,
         },
-        { status: 200, headers: corsHeaders }
+        { status: 200, headers }
       );
     }
 
@@ -69,7 +71,7 @@ export async function POST(
     if (!rpcUrl || !privateKey || !contractAddress) {
       return NextResponse.json(
         { error: "Server blockchain configuration missing in environment." },
-        { status: 500, headers: corsHeaders }
+        { status: 500, headers }
       );
     }
 
@@ -85,7 +87,7 @@ export async function POST(
         {
           error: `Deployer wallet '${wallet.address}' has insufficient funds (${ethers.formatEther(balance)} MATIC) to cover minting gas fees.`,
         },
-        { status: 500, headers: corsHeaders }
+        { status: 500, headers }
       );
     }
 
@@ -100,7 +102,7 @@ export async function POST(
     if (!receipt || receipt.status !== 1) {
       return NextResponse.json(
         { error: "Mint transaction failed or reverted on-chain." },
-        { status: 500, headers: corsHeaders }
+        { status: 500, headers }
       );
     }
 
@@ -133,7 +135,7 @@ export async function POST(
     if (!tokenIdStr) {
       return NextResponse.json(
         { error: "Could not parse token ID from mint transaction receipt." },
-        { status: 500, headers: corsHeaders }
+        { status: 500, headers }
       );
     }
 
@@ -155,13 +157,13 @@ export async function POST(
         tx_hash: credit.tx_hash,
         explorer_url,
       },
-      { status: 200, headers: corsHeaders }
+      { status: 200, headers }
     );
   } catch (error: any) {
     console.error("[Mint Route Error]", error);
     return NextResponse.json(
       { error: error?.message || "Internal server error during minting." },
-      { status: 500, headers: corsHeaders }
+      { status: 500, headers }
     );
   }
 }
