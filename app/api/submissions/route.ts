@@ -55,6 +55,7 @@ export async function GET(request: Request) {
       latitude: sub.latitude,
       longitude: sub.longitude,
       status: sub.status,
+      verification_status: sub.verification_status,
       created_at: sub.created_at,
       tx_hash: sub.credit?.tx_hash ?? null,
     }));

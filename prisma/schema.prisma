@@ -24,17 +24,18 @@ model User {
 }
 
 model Submission {
-  id           String           @id @default(uuid()) @db.Uuid
-  user_id      String           @db.Uuid
-  user         User             @relation(fields: [user_id], references: [id])
-  photo_url    String
-  ipfs_hash    String?
-  latitude     Float
-  longitude    Float
-  status       SubmissionStatus @default(pending)
-  created_at   DateTime         @default(now())
-  verification Verification?
-  credit       Credit?
+  id                   String           @id @default(uuid()) @db.Uuid
+  user_id              String           @db.Uuid
+  user                 User             @relation(fields: [user_id], references: [id])
+  photo_url            String
+  ipfs_hash            String?
+  latitude             Float
+  longitude            Float
+  status               SubmissionStatus @default(pending)
+  verification_status  String?
+  created_at           DateTime         @default(now())
+  verification         Verification?
+  credit               Credit?
 
   @@index([status])
   @@index([user_id])

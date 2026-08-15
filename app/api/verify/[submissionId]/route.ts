@@ -172,79 +172,125 @@ function evaluatePixel(samples) {
         console.warn("[Photo Check] OPENAI_API_KEY is missing in environment.");
         reasoning = "OpenAI API key missing in server configuration.";
       } else {
-        let imagePayloadUrl = submission.photo_url;
+        // The public Pinata gateway routinely times out fetching cold-cached
+        // files — both our own fetch below AND OpenAI's own image_url fetch
+        // hit the same timeout, so we must resolve to a base64 data URL
+        // ourselves rather than ever handing OpenAI a gateway URL directly.
+        // Try the submission's original gateway URL, then two well-known
+        // public IPFS gateways keyed off the same hash, before giving up.
+        const gatewayCandidates = [
+          submission.photo_url,
+          submission.ipfs_hash ? `https://ipfs.io/ipfs/${submission.ipfs_hash}` : null,
+          submission.ipfs_hash ? `https://dweb.link/ipfs/${submission.ipfs_hash}` : null,
+        ].filter((url): url is string => Boolean(url));
 
-        // Fetch image and convert to base64 for fast and reliable OpenAI Vision processing
-        try {
-          const pinataJwt = process.env.PINATA_JWT;
-          const fetchHeaders: HeadersInit = { "User-Agent": "Mozilla/5.0" };
-          if (pinataJwt && submission.photo_url.includes("pinata")) {
-            fetchHeaders["Authorization"] = `Bearer ${pinataJwt}`;
-          }
-          const imgFetchRes = await fetch(submission.photo_url, {
-            headers: fetchHeaders,
-            signal: AbortSignal.timeout(10000),
-          });
-          if (imgFetchRes.ok) {
+        let imagePayloadUrl: string | null = null;
+        const pinataJwt = process.env.PINATA_JWT;
+
+        for (const candidateUrl of gatewayCandidates) {
+          try {
+            const fetchHeaders: HeadersInit = { "User-Agent": "Mozilla/5.0" };
+            if (pinataJwt && candidateUrl.includes("pinata")) {
+              fetchHeaders["Authorization"] = `Bearer ${pinataJwt}`;
+            }
+            const imgFetchRes = await fetch(candidateUrl, {
+              headers: fetchHeaders,
+              signal: AbortSignal.timeout(12000),
+            });
+            if (!imgFetchRes.ok) {
+              console.warn(`[Photo Check] gateway returned ${imgFetchRes.status} for ${candidateUrl}`);
+              continue;
+            }
             const arrayBuffer = await imgFetchRes.arrayBuffer();
-            const base64Str = Buffer.from(arrayBuffer).toString("base64");
             let contentType = imgFetchRes.headers.get("content-type") || "image/jpeg";
             if (!contentType.startsWith("image/")) {
               contentType = "image/jpeg";
             }
-            imagePayloadUrl = `data:${contentType};base64,${base64Str}`;
+            imagePayloadUrl = `data:${contentType};base64,${Buffer.from(arrayBuffer).toString("base64")}`;
+            console.log(
+              `[Photo Check] fetched image from ${candidateUrl} (${arrayBuffer.byteLength} bytes, ${contentType})`
+            );
+            break;
+          } catch (fetchErr: any) {
+            console.warn(
+              `[Photo Check] gateway fetch failed for ${candidateUrl}: ${fetchErr.message || String(fetchErr)}`
+            );
           }
-        } catch (fetchErr) {
-          console.warn("[Photo Check] Direct image fetch for base64 conversion failed, falling back to photo_url");
         }
 
-        const openAiRes = await fetch("https://api.openai.com/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${openAiApiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: "gpt-4o-mini",
-            messages: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "text",
-                    text: "Does this photo clearly show mangrove or coastal vegetation? Respond only with JSON: {\"confidence\": 0-100, \"reasoning\": string}",
-                  },
-                  {
-                    type: "image_url",
-                    image_url: {
-                      url: imagePayloadUrl,
-                    },
-                  },
-                ],
-              },
-            ],
-            response_format: { type: "json_object" },
-            max_tokens: 300,
-          }),
-        });
-
-        if (!openAiRes.ok) {
-          const openAiErrText = await openAiRes.text();
-          console.warn(`[Photo Check] OpenAI Vision API call failed (${openAiRes.status}): ${openAiErrText}`);
-          reasoning = `OpenAI API returned error status ${openAiRes.status}.`;
+        if (!imagePayloadUrl) {
+          console.warn("[Photo Check] all IPFS gateways timed out or failed; skipping OpenAI call.");
+          reasoning = "Could not fetch the site photo from any IPFS gateway (all attempts timed out or failed).";
         } else {
-          const openAiData = await openAiRes.json();
-          const rawContent = openAiData?.choices?.[0]?.message?.content;
+          const dataUrlPrefixMatch = imagePayloadUrl.match(/^data:([^;]+);base64,/);
+          console.log(
+            `[Photo Check] request payload: model=gpt-4o-mini imageSource=base64 data URL ` +
+              `mimeType=${dataUrlPrefixMatch?.[1] ?? "unknown"} ` +
+              `payloadLength=${imagePayloadUrl.length}`
+          );
 
-          if (rawContent) {
-            const parsed = JSON.parse(rawContent);
-            if (typeof parsed.confidence === "number") {
-              photo_confidence = Math.max(0, Math.min(100, parsed.confidence));
+          const openAiRes = await fetch("https://api.openai.com/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${openAiApiKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model: "gpt-4o-mini",
+              messages: [
+                {
+                  role: "user",
+                  content: [
+                    {
+                      type: "text",
+                      text: "Does this photo clearly show mangrove or coastal vegetation? Respond only with JSON: {\"confidence\": 0-100, \"reasoning\": string}",
+                    },
+                    {
+                      type: "image_url",
+                      image_url: {
+                        url: imagePayloadUrl,
+                      },
+                    },
+                  ],
+                },
+              ],
+              response_format: { type: "json_object" },
+              max_tokens: 300,
+            }),
+          });
+
+          if (!openAiRes.ok) {
+            const openAiErrText = await openAiRes.text();
+            let errMessage = openAiErrText;
+            let errParam: string | null = null;
+            let errCode: string | null = null;
+            try {
+              const parsedErr = JSON.parse(openAiErrText);
+              errMessage = parsedErr?.error?.message ?? openAiErrText;
+              errParam = parsedErr?.error?.param ?? null;
+              errCode = parsedErr?.error?.code ?? null;
+            } catch {
+              // Body wasn't JSON — keep the raw text as the message.
             }
-            if (typeof parsed.reasoning === "string") {
-              reasoning = parsed.reasoning;
+            console.warn(
+              `[Photo Check] OpenAI Vision API call failed (${openAiRes.status}): ` +
+                `message=${errMessage} param=${errParam} code=${errCode}`
+            );
+            reasoning = `OpenAI API returned error status ${openAiRes.status}: ${errMessage}`;
+          } else {
+            const openAiData = await openAiRes.json();
+            const rawContent = openAiData?.choices?.[0]?.message?.content;
+
+            if (rawContent) {
+              const parsed = JSON.parse(rawContent);
+              if (typeof parsed.confidence === "number") {
+                photo_confidence = Math.max(0, Math.min(100, parsed.confidence));
+              }
+              if (typeof parsed.reasoning === "string") {
+                reasoning = parsed.reasoning;
+              }
+              console.log(`[Photo Check] Photo confidence: ${photo_confidence}, Reasoning: ${reasoning}`);
             }
-            console.log(`[Photo Check] Photo confidence: ${photo_confidence}, Reasoning: ${reasoning}`);
           }
         }
       }
@@ -304,7 +350,7 @@ function evaluatePixel(samples) {
 
       await prisma.submission.update({
         where: { id: submission.id },
-        data: { status: decisionStatus },
+        data: { status: decisionStatus, verification_status: verificationStatus },
       });
     } catch (dbErr: any) {
       console.error(`[Database Error] Failed to write verification or update submission: ${dbErr.message || String(dbErr)}`);
