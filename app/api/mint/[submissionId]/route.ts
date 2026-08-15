@@ -91,7 +91,14 @@ export async function POST(
 
     // 4. Server-side wallet setup
     const formattedPrivateKey = privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`;
-    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    // Pinning the network (80002 = Polygon Amoy, matching hardhat.config.ts)
+    // skips ethers' implicit network-detection call, and batchMaxCount: 1
+    // stops that detection call from being batched with the getBalance call
+    // below — Alchemy rejects batched JSON-RPC requests on this endpoint.
+    const provider = new ethers.JsonRpcProvider(rpcUrl, 80002, {
+      staticNetwork: true,
+      batchMaxCount: 1,
+    });
     const wallet = new ethers.Wallet(formattedPrivateKey, provider);
 
     // Fail early if deployer balance is too low (< 0.001 MATIC)
