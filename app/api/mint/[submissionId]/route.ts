@@ -8,6 +8,8 @@ const MINIMAL_ABI = [
   "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
 ];
 
+export const maxDuration = 60;
+
 export async function OPTIONS(request: Request) {
   return handleOptions(request);
 }
@@ -31,6 +33,7 @@ export async function POST(
     });
 
     if (!submission) {
+      console.error(`[mint] rejected: submission '${submissionId}' not found`);
       return NextResponse.json(
         { error: `Submission '${submissionId}' not found.` },
         { status: 404, headers }
@@ -39,6 +42,9 @@ export async function POST(
 
     // 2. Return 400 if submission status is not "verified"
     if (submission.status !== "verified") {
+      console.error(
+        `[mint] rejected: submission '${submissionId}' has status '${submission.status}', not 'verified'`
+      );
       return NextResponse.json(
         {
           error: `Submission '${submissionId}' cannot be minted because its status is '${submission.status}' (must be 'verified').`,
@@ -47,11 +53,18 @@ export async function POST(
       );
     }
 
-    // 3. Check for existing Credit row for this submission (idempotent double-mint protection)
-    if (submission.credit) {
-      const explorer_url = submission.credit.tx_hash
-        ? `https://amoy.polygonscan.com/tx/${submission.credit.tx_hash}`
-        : null;
+    // 3. Idempotent double-mint protection: a recorded tx_hash means minting was
+    // already submitted for this submission (possibly still unconfirmed — see
+    // below), so never call mintCredit() again. token_id is null until tx.wait()
+    // resolves and the Transfer event is parsed, so its nullness is the only
+    // signal we have for "submitted but not yet confirmed" (no separate status
+    // field on Credit).
+    if (submission.credit?.tx_hash) {
+      console.log(
+        `[mint] submission '${submissionId}' already has tx_hash ${submission.credit.tx_hash} ` +
+          `(token_id=${submission.credit.token_id ?? "pending"}); returning existing record instead of minting again`
+      );
+      const explorer_url = `https://amoy.polygonscan.com/tx/${submission.credit.tx_hash}`;
 
       return NextResponse.json(
         {
@@ -69,6 +82,7 @@ export async function POST(
     const contractAddress = process.env.CONTRACT_ADDRESS;
 
     if (!rpcUrl || !privateKey || !contractAddress) {
+      console.error("[mint] failed: blockchain configuration (RPC URL, private key, or contract address) missing in environment");
       return NextResponse.json(
         { error: "Server blockchain configuration missing in environment." },
         { status: 500, headers }
@@ -83,6 +97,9 @@ export async function POST(
     // Fail early if deployer balance is too low (< 0.001 MATIC)
     const balance = await provider.getBalance(wallet.address);
     if (balance < ethers.parseEther("0.001")) {
+      console.error(
+        `[mint] failed: deployer wallet '${wallet.address}' has insufficient funds (${ethers.formatEther(balance)} MATIC)`
+      );
       return NextResponse.json(
         {
           error: `Deployer wallet '${wallet.address}' has insufficient funds (${ethers.formatEther(balance)} MATIC) to cover minting gas fees.`,
@@ -96,10 +113,38 @@ export async function POST(
     // Call mintCredit(address to, string uri)
     const tx = await contract.mintCredit(submission.user.wallet_address, submission.photo_url);
 
-    // 5. Wait for block confirmation
+    // 5. Persist the tx hash BEFORE awaiting confirmation. If the invocation
+    // dies during tx.wait() below, the transaction may still succeed on-chain;
+    // recording the hash now means the idempotency check above will pick it
+    // up on retry instead of minting a second credit for this submission.
+    try {
+      await prisma.credit.upsert({
+        where: { submission_id: submission.id },
+        update: { tx_hash: tx.hash },
+        create: { submission_id: submission.id, tx_hash: tx.hash },
+      });
+    } catch (persistErr: any) {
+      console.error(
+        `[mint] CRITICAL: tx ${tx.hash} submitted on-chain for submission '${submissionId}' but failed to persist ` +
+          `before confirmation: ${persistErr.message || String(persistErr)}`
+      );
+    }
+
+    // 6. Wait for block confirmation
     const receipt = await tx.wait();
 
     if (!receipt || receipt.status !== 1) {
+      console.error(`[mint] failed: tx ${tx.hash} reverted or failed on-chain for submission '${submissionId}'`);
+      // The mint never actually completed, so remove the pending row rather
+      // than leaving a permanently-unconfirmable tx_hash blocking future retries.
+      try {
+        await prisma.credit.delete({ where: { submission_id: submission.id } });
+      } catch (deleteErr: any) {
+        console.error(
+          `[mint] failed to clean up pending credit row for submission '${submissionId}' after on-chain failure: ` +
+            `${deleteErr.message || String(deleteErr)}`
+        );
+      }
       return NextResponse.json(
         { error: "Mint transaction failed or reverted on-chain." },
         { status: 500, headers }
@@ -133,24 +178,39 @@ export async function POST(
     }
 
     if (!tokenIdStr) {
+      console.error(
+        `[mint] failed: could not parse token ID from receipt for confirmed tx ${tx.hash} (submission '${submissionId}')`
+      );
       return NextResponse.json(
         { error: "Could not parse token ID from mint transaction receipt." },
         { status: 500, headers }
       );
     }
 
-    // 6. Create Credit record in database
-    const credit = await prisma.credit.create({
-      data: {
-        submission_id: submission.id,
-        token_id: tokenIdStr,
-        tx_hash: receipt.hash,
-      },
-    });
+    // 7. Mark the credit confirmed now that we have the token_id.
+    let credit;
+    try {
+      credit = await prisma.credit.upsert({
+        where: { submission_id: submission.id },
+        update: { token_id: tokenIdStr, tx_hash: receipt.hash },
+        create: { submission_id: submission.id, token_id: tokenIdStr, tx_hash: receipt.hash },
+      });
+    } catch (persistErr: any) {
+      console.error(
+        `[mint] CRITICAL: tx ${receipt.hash} confirmed on-chain with token_id ${tokenIdStr} for submission ` +
+          `'${submissionId}' but failed to persist token_id: ${persistErr.message || String(persistErr)}`
+      );
+      return NextResponse.json(
+        {
+          error: `Mint confirmed on-chain (tx ${receipt.hash}, token ${tokenIdStr}) but failed to save to the database.`,
+        },
+        { status: 500, headers }
+      );
+    }
 
     const explorer_url = `https://amoy.polygonscan.com/tx/${receipt.hash}`;
 
-    // 7. Return 200 JSON
+    // 8. Return 200 JSON
     return NextResponse.json(
       {
         token_id: credit.token_id,
@@ -160,7 +220,7 @@ export async function POST(
       { status: 200, headers }
     );
   } catch (error: any) {
-    console.error("[Mint Route Error]", error);
+    console.error("[mint] failed: unexpected error", error);
     return NextResponse.json(
       { error: error?.message || "Internal server error during minting." },
       { status: 500, headers }
