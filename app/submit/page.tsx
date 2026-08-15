@@ -173,7 +173,7 @@ export default function SubmitPage() {
       body.append("photo", photo);
       body.append("latitude", latitude.trim());
       body.append("longitude", longitude.trim());
-      body.append("walletAddress", address);
+      body.append("wallet", address);
 
       const response = await fetch("/api/submit", { method: "POST", body });
 

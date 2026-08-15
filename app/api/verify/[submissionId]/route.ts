@@ -269,6 +269,20 @@ function evaluatePixel(samples) {
       decisionStatus = "rejected";
     }
 
+    // Reporting only — does not affect decisionStatus/submission.status above.
+    // "pending_imagery" means the satellite or vision check never ran (missing
+    // credentials, upstream failure), so there is no imagery basis for a
+    // verified/rejected call even though decisionStatus still resolves one.
+    const ndviAvailable = ndvi_score !== null;
+    let verificationStatus: "verified" | "pending_imagery" | "failed";
+    if (photo_confidence === null || ndvi_score === null) {
+      verificationStatus = "pending_imagery";
+    } else if (photo_confidence > 60 && ndvi_score > 0.3) {
+      verificationStatus = "verified";
+    } else {
+      verificationStatus = "failed";
+    }
+
     // 5. Write Verification row & 6. Update Submission status
     try {
       await prisma.verification.upsert({
@@ -307,6 +321,8 @@ function evaluatePixel(samples) {
         ndvi_score,
         photo_confidence,
         reasoning,
+        ndviAvailable,
+        verificationStatus,
       },
       { status: 200, headers }
     );

@@ -9,6 +9,8 @@ const POLYGONSCAN_TX = "https://amoy.polygonscan.com/tx/";
 
 type SubmissionStatus = "pending" | "verified" | "rejected";
 
+type VerificationStatus = "verified" | "pending_imagery" | "failed";
+
 type Submission = {
   id: string;
   photoUrl: string | null;
@@ -16,6 +18,7 @@ type Submission = {
   longitude: number | null;
   status: SubmissionStatus;
   txHash: string | null;
+  verificationStatus: VerificationStatus | null;
 };
 
 const STATUS_LABELS: Record<SubmissionStatus, string> = {
@@ -61,6 +64,10 @@ function normalizeSubmission(raw: unknown): Submission | null {
   if (!id) return null;
 
   const status = String(record.status ?? "pending").toLowerCase();
+  const verificationStatus = readString(
+    record.verificationStatus,
+    record.verification_status
+  );
 
   return {
     id,
@@ -70,6 +77,12 @@ function normalizeSubmission(raw: unknown): Submission | null {
     status:
       status === "verified" || status === "rejected" ? status : "pending",
     txHash: readString(record.tx_hash, record.txHash),
+    verificationStatus:
+      verificationStatus === "verified" ||
+      verificationStatus === "pending_imagery" ||
+      verificationStatus === "failed"
+        ? verificationStatus
+        : null,
   };
 }
 
@@ -312,6 +325,16 @@ export default function DashboardPage() {
                         {checkErrors[submission.id]}
                       </p>
                     )}
+
+                    {!checkErrors[submission.id] &&
+                      submission.verificationStatus &&
+                      submission.verificationStatus !== "failed" && (
+                        <p className="text-[11px] text-text-light/60">
+                          {submission.verificationStatus === "verified"
+                            ? "Verified via satellite imagery"
+                            : "Pending imagery — awaiting satellite data"}
+                        </p>
+                      )}
                   </div>
                 </div>
               </li>
