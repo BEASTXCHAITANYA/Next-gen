@@ -107,6 +107,11 @@ export default function DashboardPage() {
   const [serviceDown, setServiceDown] = useState(false);
   const [checkingId, setCheckingId] = useState<string | null>(null);
   const [checkErrors, setCheckErrors] = useState<Record<string, string>>({});
+  const [mintingId, setMintingId] = useState<string | null>(null);
+  const [mintErrors, setMintErrors] = useState<Record<string, string>>({});
+  // /api/submissions doesn't carry token_id, so a successful mint's token id
+  // only lives here for the current session — it won't survive a reload.
+  const [mintedTokenIds, setMintedTokenIds] = useState<Record<string, string>>({});
 
   const loadSubmissions = useCallback(
     async (wallet: string, signal: AbortSignal) => {
@@ -233,6 +238,61 @@ export default function DashboardPage() {
       }));
     } finally {
       setCheckingId(null);
+    }
+  }
+
+  async function handleMint(id: string) {
+    setMintingId(id);
+    setMintErrors((previous) => {
+      const next = { ...previous };
+      delete next[id];
+      return next;
+    });
+
+    try {
+      const response = await fetch(`/api/mint/${encodeURIComponent(id)}`, {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        let message = `Request failed with status ${response.status}`;
+        try {
+          const data = await response.json();
+          if (typeof data?.error === "string" && data.error.trim() !== "") {
+            message = data.error;
+          } else if (typeof data?.message === "string" && data.message.trim() !== "") {
+            message = data.message;
+          }
+        } catch {
+          // Body wasn't JSON — keep the status-based message.
+        }
+        throw new ResponseError(response.status, message);
+      }
+
+      const body: unknown = await response.json();
+      const record = body as Record<string, unknown>;
+      const tokenId = readString(record.token_id, record.tokenId);
+      const txHash = readString(record.tx_hash, record.txHash);
+
+      if (tokenId) {
+        setMintedTokenIds((previous) => ({ ...previous, [id]: tokenId }));
+      }
+      if (txHash) {
+        setSubmissions((previous) =>
+          previous.map((row) => (row.id === id ? { ...row, txHash } : row))
+        );
+      }
+    } catch (err) {
+      console.error("Minting failed:", err);
+      setMintErrors((previous) => ({
+        ...previous,
+        [id]:
+          err instanceof ResponseError
+            ? `${err.status}: ${err.message}`
+            : "Minting service unavailable.",
+      }));
+    } finally {
+      setMintingId(null);
     }
   }
 
@@ -377,6 +437,29 @@ export default function DashboardPage() {
                             : "Pending imagery — awaiting satellite data"}
                         </p>
                       )}
+
+                    {submission.status === "verified" && !submission.txHash && (
+                      <button
+                        type="button"
+                        onClick={() => handleMint(submission.id)}
+                        disabled={mintingId === submission.id}
+                        className="w-full rounded-lg bg-accent px-3 py-2 font-display text-[10px] uppercase tracking-wide text-text-dark transition-opacity hover:opacity-90 disabled:opacity-50"
+                      >
+                        {mintingId === submission.id ? "Minting..." : "Mint Credit"}
+                      </button>
+                    )}
+
+                    {mintedTokenIds[submission.id] && (
+                      <p className="text-[11px] text-text-light/60">
+                        Token ID: <span className="text-accent">#{mintedTokenIds[submission.id]}</span>
+                      </p>
+                    )}
+
+                    {mintErrors[submission.id] && (
+                      <p role="alert" className="text-[11px] text-accent">
+                        {mintErrors[submission.id]}
+                      </p>
+                    )}
                   </div>
                 </div>
               </li>
