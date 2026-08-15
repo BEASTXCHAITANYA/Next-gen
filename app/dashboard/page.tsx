@@ -21,6 +21,15 @@ type Submission = {
   verificationStatus: VerificationStatus | null;
 };
 
+/** Thrown when the server responded (non-2xx), as opposed to a network failure. */
+class ResponseError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 const STATUS_LABELS: Record<SubmissionStatus, string> = {
   pending: "Pending",
   verified: "Verified",
@@ -172,22 +181,55 @@ export default function DashboardPage() {
       const response = await fetch(`/api/verify/${encodeURIComponent(id)}`, {
         method: "POST",
       });
-      if (!response.ok) throw new Error(`Request failed: ${response.status}`);
 
+      if (!response.ok) {
+        let message = `Request failed with status ${response.status}`;
+        try {
+          const data = await response.json();
+          if (typeof data?.error === "string" && data.error.trim() !== "") {
+            message = data.error;
+          } else if (typeof data?.message === "string" && data.message.trim() !== "") {
+            message = data.message;
+          }
+        } catch {
+          // Body wasn't JSON — keep the status-based message.
+        }
+        throw new ResponseError(response.status, message);
+      }
+
+      // The verify route doesn't echo the submission id back (the caller
+      // already knows it), so its response can't go through
+      // normalizeSubmission — that requires an id and would always return
+      // null here. Merge the returned fields into the matching row instead.
       const body: unknown = await response.json();
-      const updated = normalizeSubmission(
-        (body as { submission?: unknown })?.submission ?? body
+      const record = body as Record<string, unknown>;
+      const statusRaw = String(record.status ?? "pending").toLowerCase();
+      const newStatus: SubmissionStatus =
+        statusRaw === "verified" || statusRaw === "rejected" ? statusRaw : "pending";
+      const verificationStatusRaw = readString(
+        record.verificationStatus,
+        record.verification_status
       );
-      if (!updated) throw new Error("Unexpected response shape");
+      const verificationStatus: VerificationStatus | null =
+        verificationStatusRaw === "verified" ||
+        verificationStatusRaw === "pending_imagery" ||
+        verificationStatusRaw === "failed"
+          ? verificationStatusRaw
+          : null;
 
       setSubmissions((previous) =>
-        previous.map((row) => (row.id === id ? updated : row))
+        previous.map((row) =>
+          row.id === id ? { ...row, status: newStatus, verificationStatus } : row
+        )
       );
     } catch (err) {
       console.error("Verification check failed:", err);
       setCheckErrors((previous) => ({
         ...previous,
-        [id]: "Verification service unavailable.",
+        [id]:
+          err instanceof ResponseError
+            ? `${err.status}: ${err.message}`
+            : "Verification service unavailable.",
       }));
     } finally {
       setCheckingId(null);
